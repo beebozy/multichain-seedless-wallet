@@ -1,0 +1,33 @@
+groups:
+  - name: backend-alerts
+    rules:
+      - alert: BackendHighPaymentFailureRate
+        expr: |
+          sum(rate(backend_payments_total{status="failed"}[5m]))
+          /
+          clamp_min(sum(rate(backend_payments_total[5m])), 0.001)
+          > 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High payment failure rate"
+          description: "More than 20% of payments are failing for 10m"
+
+      - alert: BackendIndexerLagHigh
+        expr: backend_indexer_lag_blocks > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexer lag high"
+          description: "Indexer lag has exceeded 300 blocks for 5m"
+
+      - alert: BackendNotificationFailureSpike
+        expr: sum(rate(backend_notifications_total{status="failed"}[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Notification failures detected"
+          description: "Notification failure rate is elevated"

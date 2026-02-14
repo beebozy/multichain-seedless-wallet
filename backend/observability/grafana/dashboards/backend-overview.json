@@ -1,0 +1,41 @@
+{
+  "id": null,
+  "title": "Backend Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP RPS",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(backend_http_requests_total[1m]))", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Payment Outcomes",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "sum(rate(backend_payments_total{status=\"settled\"}[5m]))", "refId": "A", "legendFormat": "settled"},
+        {"expr": "sum(rate(backend_payments_total{status=\"failed\"}[5m]))", "refId": "B", "legendFormat": "failed"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Indexer Lag (blocks)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "backend_indexer_lag_blocks", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Notification Outcomes",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "sum(rate(backend_notifications_total{status=\"sent\"}[5m]))", "refId": "A", "legendFormat": "sent"},
+        {"expr": "sum(rate(backend_notifications_total{status=\"failed\"}[5m]))", "refId": "B", "legendFormat": "failed"}
+      ]
+    }
+  ],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"}
+}

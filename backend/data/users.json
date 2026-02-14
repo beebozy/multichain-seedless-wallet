@@ -1,0 +1,34 @@
+[
+  {
+    "id": "user_0d910bad70d8",
+    "handle": "newuser@example.com",
+    "walletAddress": "0x99cEe0D9F0264751e9476048416e3701B2C33BF1",
+    "chain": "tempo",
+    "privateKey": "0x669dc24701a593e2032675f2257b25f3e6a6066fa5ad0b1efb2be155feb68c4f",
+    "custodial": true
+  },
+  {
+    "id": "user_7471664e3337",
+    "handle": "owner@local",
+    "walletAddress": "0x8FFD27F9c81ffE73363ab3Efe4A378CB1617ABE2",
+    "chain": "tempo",
+    "privateKey": "0x9aff12674ff8890739093dbd3dc4f37f58c8d577aa4a97c004193883c3980b09",
+    "custodial": true
+  },
+  {
+    "id": "user_owner",
+    "handle": "owner@local",
+    "walletAddress": "0xF554609524Ae96f40dBC06414d409b4ddeeB1980",
+    "privateKey": "0x049a0788bdb52c8706b1a66342476cd0fc035ee32b452dbd53ebb02c444e438f",
+    "chain": "tempo",
+    "custodial": true
+  },
+  {
+    "id": "user_1dbd0ccc7ee8",
+    "handle": "privyuser@example.com",
+    "walletAddress": "0x1111111111111111111111111111111111111111",
+    "chain": "tempo",
+    "privyUserId": "did:privy:demo-user-1",
+    "custodial": false
+  }
+]

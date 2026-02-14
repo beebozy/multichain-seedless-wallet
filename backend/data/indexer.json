@@ -1,0 +1,49 @@
+{
+  "lastSyncedBlock": 4835877,
+  "events": [
+    {
+      "tokenAddress": "0x20c000000000000000000000A594f7e512f8CbD0",
+      "txHash": "0xd8acdee3ab6374cfc9adbcd4032dba2e525a90e77b13bdc24aadbe3dacd2bb9c",
+      "blockNumber": 4831441,
+      "logIndex": 53,
+      "from": "0xF554609524Ae96f40dBC06414d409b4ddeeB1980",
+      "to": "0x99cEe0D9F0264751e9476048416e3701B2C33BF1",
+      "amountRaw": "1500000",
+      "memoHex": "0x6532652074657374000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-02-13T17:07:49.000Z"
+    },
+    {
+      "tokenAddress": "0x20c000000000000000000000A594f7e512f8CbD0",
+      "txHash": "0x4aa3810570b52326ad12602b952b2a61ae6c351f170b3f90f9939c794fc57da6",
+      "blockNumber": 4833192,
+      "logIndex": 58,
+      "from": "0xF554609524Ae96f40dBC06414d409b4ddeeB1980",
+      "to": "0x99cEe0D9F0264751e9476048416e3701B2C33BF1",
+      "amountRaw": "750000",
+      "memoHex": "0x7461736b35000000000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-02-13T17:26:54.000Z"
+    },
+    {
+      "tokenAddress": "0x20c000000000000000000000A594f7e512f8CbD0",
+      "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "blockNumber": 1,
+      "logIndex": 1,
+      "from": "0xF554609524Ae96f40dBC06414d409b4ddeeB1980",
+      "to": "0x1111111111111111111111111111111111111111",
+      "amountRaw": "1000",
+      "memoHex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-02-13T17:31:47.252Z"
+    },
+    {
+      "tokenAddress": "0x20c000000000000000000000A594f7e512f8CbD0",
+      "txHash": "0xa99536921e5356deb575d63e5693e6435bc74a50d9ccb0c903293615aba8530a",
+      "blockNumber": 4833645,
+      "logIndex": 89,
+      "from": "0xF554609524Ae96f40dBC06414d409b4ddeeB1980",
+      "to": "0x99cEe0D9F0264751e9476048416e3701B2C33BF1",
+      "amountRaw": "330000",
+      "memoHex": "0x7065727369737400000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-02-13T17:31:49.000Z"
+    }
+  ]
+}

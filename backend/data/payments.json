@@ -1,0 +1,36 @@
+{
+  "payments": [
+    {
+      "paymentId": "0xa99536921e5356deb575d63e5693e6435bc74a50d9ccb0c903293615aba8530a",
+      "senderUserId": "user_owner",
+      "recipientUserId": "user_0d910bad70d8",
+      "recipientHandle": "newuser@example.com",
+      "amountUsd": 0.33,
+      "stablecoin": "iUSD",
+      "memo": "persist",
+      "memoHex": "0x7065727369737400000000000000000000000000000000000000000000000000",
+      "status": "settled",
+      "chain": "tempo",
+      "txHash": "0xa99536921e5356deb575d63e5693e6435bc74a50d9ccb0c903293615aba8530a",
+      "sponsoredFee": true,
+      "createdAt": "2026-02-13T17:31:50.491Z",
+      "idempotencyKey": "task5-send-003"
+    },
+    {
+      "paymentId": "0x4aa3810570b52326ad12602b952b2a61ae6c351f170b3f90f9939c794fc57da6",
+      "senderUserId": "user_owner",
+      "recipientUserId": "user_0d910bad70d8",
+      "recipientHandle": "newuser@example.com",
+      "amountUsd": 0.75,
+      "stablecoin": "iUSD",
+      "memo": "task5",
+      "memoHex": "0x7461736b35000000000000000000000000000000000000000000000000000000",
+      "status": "settled",
+      "chain": "tempo",
+      "txHash": "0x4aa3810570b52326ad12602b952b2a61ae6c351f170b3f90f9939c794fc57da6",
+      "sponsoredFee": true,
+      "createdAt": "2026-02-13T17:26:56.546Z",
+      "idempotencyKey": "task5-send-001"
+    }
+  ]
+}

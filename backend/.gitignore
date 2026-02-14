@@ -1,0 +1,16 @@
+node_modules/
+
+# Local environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Local runtime data
+data/backend.sqlite
+data/backend.sqlite-shm
+data/backend.sqlite-wal

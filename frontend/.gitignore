@@ -1,0 +1,14 @@
+node_modules/
+
+# Local environment
+.env.local
+.env.*.local
+
+# Next.js build/cache
+.next/
+
+# Local npm cache
+.npm-cache/
+
+# Build metadata
+*.tsbuildinfo
