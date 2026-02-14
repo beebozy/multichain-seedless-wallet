@@ -6,6 +6,7 @@ export type BackendSession = {
     email?: string;
     phone?: string;
     wallet?: string;
+    walletId?: string;
     role?: string;
   };
 };
@@ -13,6 +14,7 @@ export type BackendSession = {
 export type PrivyUpsertInput = {
   privyUserId: string;
   walletAddress: string;
+  walletId?: string;
   email?: string;
   phone?: string;
 };
@@ -112,6 +114,39 @@ export type NotificationResponse = {
   nextCursor: string | null;
 };
 
+export type PaymentResponse = {
+  paymentId: string;
+  senderUserId: string;
+  recipientUserId: string;
+  recipientHandle: string;
+  amountUsd: number;
+  stablecoin: string;
+  memo?: string;
+  memoHex: string;
+  status: "initiated" | "pending_claim" | "submitted" | "settled" | "failed" | "expired";
+  chain: string;
+  txHash?: string;
+  sponsoredFee: boolean;
+  createdAt: string;
+  idempotencyKey: string;
+  failureCode?: string;
+  failureMessage?: string;
+  expiresAt?: string;
+  claimedAt?: string;
+};
+
+export type ResolveRecipientResponse = {
+  found: boolean;
+  provisioned: boolean;
+  userId?: string;
+  handle: string;
+  walletAddress?: string;
+  chain?: string;
+  custodial?: boolean;
+  privyUserId?: string;
+  safetyFlags?: string[];
+};
+
 const headersFor = (session: BackendSession): HeadersInit => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json"
@@ -126,6 +161,7 @@ const headersFor = (session: BackendSession): HeadersInit => {
   if (dev?.email) headers["x-dev-email"] = dev.email;
   if (dev?.phone) headers["x-dev-phone"] = dev.phone;
   if (dev?.wallet) headers["x-dev-wallet"] = dev.wallet;
+  if (dev?.walletId) headers["x-dev-wallet-id"] = dev.walletId;
   if (dev?.role) headers["x-dev-role"] = dev.role;
 
   return headers;
@@ -170,7 +206,7 @@ export async function fetchDashboard(session: BackendSession, userId: string) {
 }
 
 export async function resolveRecipient(session: BackendSession, handle: string) {
-  return req(session, "/v1/auth/resolve-recipient", {
+  return req<ResolveRecipientResponse>(session, "/v1/auth/resolve-recipient", {
     method: "POST",
     body: JSON.stringify({ handle })
   });
@@ -181,7 +217,7 @@ export async function sendPayment(
   input: { recipientHandle: string; amountUsd: number; stablecoin: string; memo?: string }
 ) {
   const idempotencyKey = `ui_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  return req(session, "/v1/payments/send", {
+  return req<PaymentResponse>(session, "/v1/payments/send", {
     method: "POST",
     body: JSON.stringify({ ...input, idempotencyKey })
   });
@@ -191,7 +227,7 @@ export type PrepareSignedPaymentResponse = {
   paymentId: string;
   senderUserId: string;
   recipientUserId: string;
-  status: "initiated" | "submitted" | "settled" | "failed";
+  status: "initiated" | "pending_claim" | "submitted" | "settled" | "failed" | "expired";
   txRequest: {
     to: string;
     data: string;
@@ -220,7 +256,7 @@ export async function confirmSignedPayment(
   session: BackendSession,
   input: { paymentId: string; txHash: string }
 ) {
-  return req(session, "/v1/payments/confirm-signed", {
+  return req<PaymentResponse>(session, "/v1/payments/confirm-signed", {
     method: "POST",
     body: JSON.stringify(input)
   });

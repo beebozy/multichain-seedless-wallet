@@ -9,6 +9,10 @@ export class PrivyUpsertDto {
 
   @IsOptional()
   @IsString()
+  walletId?: string;
+
+  @IsOptional()
+  @IsString()
   email?: string;
 
   @IsOptional()

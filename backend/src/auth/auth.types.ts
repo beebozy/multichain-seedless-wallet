@@ -5,7 +5,9 @@ export type AuthUser = {
   email?: string;
   phone?: string;
   walletAddress?: string;
+  walletId?: string;
   role?: string;
+  rawJwt?: string;
 };
 
 export type RequestWithAuth = Request & {

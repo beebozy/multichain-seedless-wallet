@@ -11,6 +11,7 @@ import { AuthUser, RequestWithAuth } from './auth.types';
 export class AuthGuard implements CanActivate {
   private readonly allowInsecureDev = (process.env.AUTH_ALLOW_INSECURE_DEV ?? 'false') === 'true';
   private readonly issuer = process.env.AUTH_ISSUER?.trim();
+  private readonly issuerCandidates = this.buildIssuerCandidates(this.issuer);
   private readonly audience = process.env.AUTH_AUDIENCE?.trim();
   private readonly jwksUrl = process.env.AUTH_JWKS_URL?.trim();
   private readonly jwks = this.jwksUrl ? createRemoteJWKSet(new URL(this.jwksUrl)) : null;
@@ -26,6 +27,7 @@ export class AuthGuard implements CanActivate {
           email: this.header(req, 'x-dev-email') ?? undefined,
           phone: this.header(req, 'x-dev-phone') ?? undefined,
           walletAddress: this.header(req, 'x-dev-wallet') ?? undefined,
+          walletId: this.header(req, 'x-dev-wallet-id') ?? undefined,
           role: this.header(req, 'x-dev-role') ?? undefined,
         };
         return true;
@@ -41,11 +43,12 @@ export class AuthGuard implements CanActivate {
     }
 
     const verifyResult = await jwtVerify(token, this.jwks, {
-      issuer: this.issuer,
+      issuer: this.issuerCandidates,
       audience: this.audience,
     });
 
     req.authUser = this.toAuthUser(verifyResult.payload);
+    req.authUser.rawJwt = token;
     if (!req.authUser.sub) {
       throw new UnauthorizedException('Invalid token subject');
     }
@@ -70,12 +73,14 @@ export class AuthGuard implements CanActivate {
       this.stringValue(payload, 'walletAddress') ||
       this.stringValue(payload, 'wallet_address') ||
       this.stringValue(payload, 'address');
+    const walletId = this.stringValue(payload, 'walletId') || this.stringValue(payload, 'wallet_id');
 
     return {
       sub: payload.sub ?? '',
       email: this.stringValue(payload, 'email'),
       phone: this.stringValue(payload, 'phone_number') || this.stringValue(payload, 'phone'),
       walletAddress,
+      walletId,
       role: this.stringValue(payload, 'role'),
     };
   }
@@ -92,5 +97,21 @@ export class AuthGuard implements CanActivate {
       return value[0] ?? null;
     }
     return value ?? null;
+  }
+
+  private buildIssuerCandidates(issuer: string | undefined): string | string[] | undefined {
+    if (!issuer) {
+      return undefined;
+    }
+    const trimmed = issuer.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    const withSlash = trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+    const withoutSlash = trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+    if (withSlash === withoutSlash) {
+      return trimmed;
+    }
+    return [withoutSlash, withSlash];
   }
 }

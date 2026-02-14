@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -38,6 +39,7 @@ type UserRow = {
   wallet_address: string;
   chain: string;
   privy_user_id: string | null;
+  privy_wallet_id: string | null;
   custodial: number;
   encrypted_private_key: string | null;
 };
@@ -52,12 +54,14 @@ type PaymentRow = {
   stablecoin: string;
   memo: string | null;
   memo_hex: string;
-  status: 'initiated' | 'submitted' | 'settled' | 'failed';
+  status: 'initiated' | 'pending_claim' | 'submitted' | 'settled' | 'failed' | 'expired';
   chain: string;
   tx_hash: string | null;
   sponsored_fee: number;
   failure_code: string | null;
   failure_message: string | null;
+  expires_at: string | null;
+  claimed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -232,26 +236,33 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     this.requireAuth(auth);
 
     const normalized = this.normalizeHandle(handle);
-    let user = this.findUserByHandle(normalized);
+    const user = this.findUserByHandle(normalized);
 
-    let provisioned = false;
+    this.audit(auth, 'resolve_recipient', user?.id ?? normalized, {
+      handle,
+      found: Boolean(user),
+      mode: user ? 'registered' : 'pending_claim',
+    });
+
     if (!user) {
-      user = this.provisionCustodialUser(handle.trim());
-      provisioned = true;
+      return {
+        found: false,
+        provisioned: false,
+        handle: normalized,
+        safetyFlags: ['recipient_not_registered'],
+      };
     }
-
-    this.audit(auth, 'resolve_recipient', user.id, { handle, provisioned });
 
     return {
       found: true,
-      provisioned,
+      provisioned: false,
       userId: user.id,
       handle: user.handle,
       walletAddress: user.walletAddress,
       chain: user.chain,
       custodial: user.custodial,
       privyUserId: user.privyUserId,
-      safetyFlags: provisioned ? ['new_custodial_wallet_created'] : [],
+      safetyFlags: [],
     };
   }
 
@@ -267,16 +278,17 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     const normalizedHandle = this.normalizeHandle(handle);
     const wallet = input.walletAddress.toLowerCase();
 
-    const existing =
-      this.db
-        .prepare('SELECT * FROM users WHERE privy_user_id = ?')
-        .get(input.privyUserId) ||
-      this.db
-        .prepare('SELECT * FROM users WHERE lower(handle) = ?')
-        .get(normalizedHandle) ||
-      this.db
-        .prepare('SELECT * FROM users WHERE lower(wallet_address) = ?')
-        .get(wallet);
+    const existingByPrivy = this.db
+      .prepare('SELECT * FROM users WHERE privy_user_id = ? LIMIT 1')
+      .get(input.privyUserId) as UserRow | undefined;
+    const existingByHandle = this.db
+      .prepare('SELECT * FROM users WHERE lower(handle) = ? LIMIT 1')
+      .get(normalizedHandle) as UserRow | undefined;
+    const existingByWallet = this.db
+      .prepare('SELECT * FROM users WHERE lower(wallet_address) = ? LIMIT 1')
+      .get(wallet) as UserRow | undefined;
+
+    const existing = existingByPrivy || existingByHandle || existingByWallet;
 
     let provisioned = false;
     let id: string;
@@ -284,23 +296,48 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       id = `user_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
       this.db
         .prepare(
-          `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, custodial, encrypted_private_key, created_at)
-           VALUES (?, ?, ?, ?, ?, 0, NULL, ?)` ,
+          `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)` ,
         )
-        .run(id, handle, input.walletAddress, this.chainName, input.privyUserId, new Date().toISOString());
+        .run(id, handle, input.walletAddress, this.chainName, input.privyUserId, input.walletId ?? null, new Date().toISOString());
       provisioned = true;
     } else {
       id = (existing as UserRow).id;
-      this.db
-        .prepare(
-          `UPDATE users
-           SET handle = ?, wallet_address = ?, privy_user_id = ?, custodial = 0, encrypted_private_key = NULL
-           WHERE id = ?`,
-        )
-        .run(handle, input.walletAddress, input.privyUserId, id);
+      const collisionRows = [existingByPrivy, existingByHandle, existingByWallet]
+        .filter((row): row is UserRow => Boolean(row))
+        .filter((row) => row.id !== id);
+
+      for (const row of collisionRows) {
+        if (row.privy_user_id && row.privy_user_id !== input.privyUserId) {
+          throw new ConflictException(
+            `Cannot link Privy user. Existing account collision on handle/wallet: ${row.id}`,
+          );
+        }
+        this.mergeUsers(id, row.id);
+      }
+
+      try {
+        this.db
+          .prepare(
+            `UPDATE users
+             SET handle = ?, wallet_address = ?, privy_user_id = ?, privy_wallet_id = COALESCE(?, privy_wallet_id), custodial = 0, encrypted_private_key = NULL
+             WHERE id = ?`,
+          )
+          .run(handle, input.walletAddress, input.privyUserId, input.walletId ?? null, id);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.toLowerCase().includes('unique')) {
+          throw new ConflictException(`User link conflict: ${msg}`);
+        }
+        throw error;
+      }
     }
 
     const user = this.getUserById(id);
+    void this.claimPendingPaymentsForHandle(user.handle, user.id, user.walletAddress, auth).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Pending claim release failed for ${user.handle}: ${message}`);
+    });
     this.audit(auth, 'privy_upsert', user.id, { provisioned });
 
     return {
@@ -316,12 +353,197 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private mergeUsers(targetUserId: string, sourceUserId: string) {
+    if (targetUserId === sourceUserId) {
+      return;
+    }
+
+    this.db.prepare('UPDATE payments SET sender_user_id = ? WHERE sender_user_id = ?').run(targetUserId, sourceUserId);
+    this.db
+      .prepare('UPDATE payments SET recipient_user_id = ? WHERE recipient_user_id = ?')
+      .run(targetUserId, sourceUserId);
+    this.db.prepare('UPDATE notifications SET user_id = ? WHERE user_id = ?').run(targetUserId, sourceUserId);
+    this.db.prepare('UPDATE audit_logs SET actor_user_id = ? WHERE actor_user_id = ?').run(targetUserId, sourceUserId);
+    this.db.prepare('DELETE FROM users WHERE id = ?').run(sourceUserId);
+  }
+
   async sendPayment(auth: AuthUser | undefined, input: SendPaymentDto) {
     this.requireAuth(auth);
-    void input;
-    throw new BadRequestException(
-      'Direct backend signing is disabled. Use /v1/payments/prepare and /v1/payments/confirm-signed.',
+    this.ensureProvider();
+
+    const sender = this.resolveActor(auth);
+    this.logger.log(
+      `[sendPayment] step=entry senderUserId=${sender.id} senderWallet=${sender.walletAddress} senderPrivyWalletId=${sender.privyWalletId ?? 'missing'}`,
     );
+    const normalizedRecipientHandle = this.normalizeHandle(input.recipientHandle);
+    const recipient = this.findUserByHandle(normalizedRecipientHandle);
+    const stablecoin = this.getStablecoinBySymbol(input.stablecoin);
+    const existing = this.db
+      .prepare(
+        'SELECT * FROM payments WHERE idempotency_key = ? AND sender_user_id = ? ORDER BY created_at DESC LIMIT 1',
+      )
+      .get(input.idempotencyKey, sender.id) as PaymentRow | undefined;
+
+    if (existing) {
+      return this.paymentRowToResponse(existing);
+    }
+
+    const paymentId = `pay_${Date.now()}_${randomUUID().replace(/-/g, '').slice(0, 6)}`;
+    const memoHex = this.memoToBytes32(input.memo);
+    const now = new Date().toISOString();
+    const claimExpiryHours = Number(this.env('PENDING_CLAIM_EXPIRY_HOURS') ?? 72);
+    const claimExpiresAt = new Date(Date.now() + claimExpiryHours * 60 * 60 * 1000).toISOString();
+
+    if (!recipient) {
+      const pendingRecipientId = `pending:${normalizedRecipientHandle}`;
+      this.db
+        .prepare(
+          `INSERT INTO payments (
+            payment_id, idempotency_key, sender_user_id, recipient_user_id, recipient_handle,
+            amount_usd, stablecoin, memo, memo_hex, status, chain, tx_hash,
+            sponsored_fee, failure_code, failure_message, expires_at, claimed_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_claim', ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
+        )
+        .run(
+          paymentId,
+          input.idempotencyKey,
+          sender.id,
+          pendingRecipientId,
+          normalizedRecipientHandle,
+          input.amountUsd,
+          stablecoin.symbol,
+          input.memo ?? null,
+          memoHex,
+          this.chainName,
+          this.feeSponsored ? 1 : 0,
+          'recipient_unregistered',
+          `Recipient must sign up before ${claimExpiresAt}`,
+          claimExpiresAt,
+          now,
+          now,
+        );
+
+      this.audit(auth, 'send_payment_pending_claim', paymentId, {
+        senderUserId: sender.id,
+        recipientHandle: normalizedRecipientHandle,
+        expiresAt: claimExpiresAt,
+        stablecoin: stablecoin.symbol,
+      });
+
+      const pending = this.db
+        .prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1')
+        .get(paymentId) as PaymentRow;
+      return this.paymentRowToResponse(pending);
+    }
+
+    if (!auth.rawJwt) {
+      throw new UnauthorizedException(
+        'Missing bearer token for Privy authorization context. Use Authorization: Bearer <Privy access token>.',
+      );
+    }
+    if (!sender.privyWalletId) {
+      throw new BadRequestException(
+        'Sender wallet is missing Privy wallet id. Re-authenticate so backend can link your embedded wallet id.',
+      );
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO payments (
+          payment_id, idempotency_key, sender_user_id, recipient_user_id, recipient_handle,
+          amount_usd, stablecoin, memo, memo_hex, status, chain, tx_hash,
+          sponsored_fee, failure_code, failure_message, expires_at, claimed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'initiated', ?, NULL, ?, NULL, NULL, NULL, NULL, ?, ?)` ,
+      )
+      .run(
+        paymentId,
+        input.idempotencyKey,
+        sender.id,
+        recipient.id,
+        recipient.handle,
+        input.amountUsd,
+        stablecoin.symbol,
+        input.memo ?? null,
+        memoHex,
+        this.chainName,
+        this.feeSponsored ? 1 : 0,
+        now,
+        now,
+      );
+
+    try {
+      this.logger.log(
+        `[sendPayment] step=build_tx_request paymentId=${paymentId} senderWallet=${sender.walletAddress} recipientWallet=${recipient.walletAddress} stablecoin=${stablecoin.symbol}`,
+      );
+      const txRequest = await this.buildSignedTxRequest(
+        sender.walletAddress,
+        recipient.walletAddress,
+        stablecoin,
+        input.amountUsd,
+        memoHex,
+      );
+      this.logger.log(
+        `[sendPayment] step=privy_send_start paymentId=${paymentId} senderPrivyWalletId=${sender.privyWalletId}`,
+      );
+      const txHash = await this.sendPrivyAuthorizedTransaction(sender.privyWalletId, auth.rawJwt, {
+        from: sender.walletAddress,
+        to: txRequest.to,
+        data: txRequest.data,
+        value: txRequest.value,
+        gas: txRequest.gasLimit ? `0x${BigInt(txRequest.gasLimit).toString(16)}` : undefined,
+      });
+      this.logger.log(`[sendPayment] step=privy_send_ok paymentId=${paymentId} txHash=${txHash}`);
+
+      this.db
+        .prepare(`UPDATE payments SET status = 'submitted', tx_hash = ?, updated_at = ? WHERE payment_id = ?`)
+        .run(txHash, new Date().toISOString(), paymentId);
+
+      const receipt = await (this.provider as JsonRpcProvider).waitForTransaction(txHash, 1);
+      const settled = receipt?.status === 1;
+      this.db
+        .prepare(
+          `UPDATE payments
+           SET status = ?, updated_at = ?, failure_code = ?, failure_message = ?
+           WHERE payment_id = ?`,
+        )
+        .run(
+          settled ? 'settled' : 'failed',
+          new Date().toISOString(),
+          settled ? null : 'receipt_failed',
+          settled ? null : 'Transaction receipt status indicates failure',
+          paymentId,
+        );
+
+      this.metrics.incPayment(settled ? 'settled' : 'failed', stablecoin.symbol, 'privy_authorized');
+      await this.syncIndexerInternal();
+
+      const row = this.db
+        .prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1')
+        .get(paymentId) as PaymentRow;
+      if (settled) {
+        this.enqueuePaymentNotifications(row);
+      }
+
+      this.audit(auth, 'send_payment_privy_authorized', paymentId, {
+        txHash,
+        senderUserId: sender.id,
+        senderWallet: sender.walletAddress,
+        senderPrivyWalletId: sender.privyWalletId,
+      });
+
+      return this.paymentRowToResponse(row);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.db
+        .prepare(
+          `UPDATE payments
+           SET status = 'failed', updated_at = ?, failure_code = ?, failure_message = ?
+           WHERE payment_id = ?`,
+        )
+        .run(new Date().toISOString(), 'privy_authorized_error', message, paymentId);
+
+      throw new BadRequestException(`Privy authorized send failed: ${message}`);
+    }
   }
 
   async prepareSignedPayment(auth: AuthUser | undefined, input: SendPaymentDto) {
@@ -329,7 +551,13 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     this.ensureProvider();
 
     const sender = this.resolveActor(auth);
-    const recipient = this.getOrProvisionUserByHandle(input.recipientHandle);
+    const normalizedRecipientHandle = this.normalizeHandle(input.recipientHandle);
+    const recipient = this.findUserByHandle(normalizedRecipientHandle);
+    if (!recipient) {
+      throw new BadRequestException(
+        'Recipient is not registered yet. Use /v1/payments/send to create a pending claim and invite them.',
+      );
+    }
     const stablecoin = this.getStablecoinBySymbol(input.stablecoin);
 
     const existing = this.db
@@ -363,8 +591,8 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
         `INSERT INTO payments (
           payment_id, idempotency_key, sender_user_id, recipient_user_id, recipient_handle,
           amount_usd, stablecoin, memo, memo_hex, status, chain, tx_hash,
-          sponsored_fee, failure_code, failure_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'initiated', ?, NULL, ?, NULL, NULL, ?, ?)` ,
+          sponsored_fee, failure_code, failure_message, expires_at, claimed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'initiated', ?, NULL, ?, NULL, NULL, NULL, NULL, ?, ?)` ,
       )
       .run(
         paymentId,
@@ -766,6 +994,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
         wallet_address TEXT NOT NULL,
         chain TEXT NOT NULL,
         privy_user_id TEXT,
+        privy_wallet_id TEXT,
         custodial INTEGER NOT NULL,
         encrypted_private_key TEXT,
         created_at TEXT NOT NULL
@@ -773,6 +1002,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       CREATE UNIQUE INDEX IF NOT EXISTS users_handle_idx ON users(lower(handle));
       CREATE UNIQUE INDEX IF NOT EXISTS users_wallet_idx ON users(lower(wallet_address));
       CREATE UNIQUE INDEX IF NOT EXISTS users_privy_idx ON users(privy_user_id);
+      CREATE INDEX IF NOT EXISTS users_privy_wallet_id_idx ON users(privy_wallet_id);
 
       CREATE TABLE IF NOT EXISTS payments (
         payment_id TEXT PRIMARY KEY,
@@ -790,6 +1020,8 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
         sponsored_fee INTEGER NOT NULL,
         failure_code TEXT,
         failure_message TEXT,
+        expires_at TEXT,
+        claimed_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -845,6 +1077,22 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS notifications_pending_idx
         ON notifications(status, next_retry_at);
     `);
+
+    const paymentColumns = this.db.prepare(`PRAGMA table_info(payments)`).all() as Array<{ name: string }>;
+    const hasExpiresAt = paymentColumns.some((col) => col.name === 'expires_at');
+    const hasClaimedAt = paymentColumns.some((col) => col.name === 'claimed_at');
+    if (!hasExpiresAt) {
+      this.db.exec(`ALTER TABLE payments ADD COLUMN expires_at TEXT`);
+    }
+    if (!hasClaimedAt) {
+      this.db.exec(`ALTER TABLE payments ADD COLUMN claimed_at TEXT`);
+    }
+
+    const userColumns = this.db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
+    const hasPrivyWalletId = userColumns.some((col) => col.name === 'privy_wallet_id');
+    if (!hasPrivyWalletId) {
+      this.db.exec(`ALTER TABLE users ADD COLUMN privy_wallet_id TEXT`);
+    }
 
     const hasState = this.db.prepare('SELECT 1 FROM indexer_state WHERE id = 1').get();
     if (!hasState) {
@@ -971,6 +1219,8 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       idempotencyKey: row.idempotency_key,
       failureCode: row.failure_code ?? undefined,
       failureMessage: row.failure_message ?? undefined,
+      expiresAt: row.expires_at ?? undefined,
+      claimedAt: row.claimed_at ?? undefined,
     };
   }
 
@@ -1007,6 +1257,229 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       memoHex,
       stablecoin: stablecoin.symbol,
     };
+  }
+
+  private async sendPrivyAuthorizedTransaction(
+    senderPrivyWalletId: string,
+    userJwt: string,
+    tx: { from: string; to: string; data: string; value: string; gas?: string },
+  ): Promise<string> {
+    const privyAppId = this.env('PRIVY_APP_ID');
+    const privyAppSecret = this.env('PRIVY_APP_SECRET');
+    if (!privyAppId || !privyAppSecret) {
+      throw new BadRequestException('PRIVY_APP_ID and PRIVY_APP_SECRET are required for Privy authorized sends.');
+    }
+    this.logger.log(`[privySend] step=verify_start walletId=${senderPrivyWalletId}`);
+    const jwtDebug = this.jwtDebugPayload(userJwt);
+    const jwtPayload = this.jwtPayload(userJwt);
+    const nowEpochSec = Math.floor(Date.now() / 1000);
+    if (!jwtPayload) {
+      this.logger.error(`[privySend] step=verify_precheck_failed reason=invalid_jwt walletId=${senderPrivyWalletId}`);
+      throw new BadRequestException('Privy authorization token is not a valid JWT.');
+    }
+    if (typeof jwtPayload.exp === 'number' && jwtPayload.exp <= nowEpochSec) {
+      this.logger.error(
+        `[privySend] step=verify_precheck_failed reason=expired_jwt walletId=${senderPrivyWalletId} exp=${jwtPayload.exp} now=${nowEpochSec}`,
+      );
+      throw new BadRequestException(
+        `Privy authorization token is expired (exp=${jwtPayload.exp}, now=${nowEpochSec}). Re-login and retry.`,
+      );
+    }
+    const aud = jwtPayload.aud;
+    const audList = Array.isArray(aud) ? aud : typeof aud === 'string' ? [aud] : [];
+    if (audList.length > 0 && !audList.includes(privyAppId)) {
+      this.logger.error(
+        `[privySend] step=verify_precheck_failed reason=aud_mismatch walletId=${senderPrivyWalletId} expectedAud=${privyAppId} gotAud=${audList.join(',')}`,
+      );
+      throw new BadRequestException(
+        `Privy authorization token audience mismatch. Expected ${privyAppId}, got ${audList.join(', ')}.`,
+      );
+    }
+    const caip2 = this.env('CHAIN_CAIP2') ?? `eip155:${this.chainId}`;
+    let PrivyClientCtor: new (input: { appId: string; appSecret: string }) => {
+      wallets: () => {
+        ethereum: () => {
+          sendTransaction: (
+            walletId: string,
+            input: {
+              caip2: string;
+              params: {
+                transaction: {
+                  from: string;
+                  to: string;
+                  data: string;
+                  value: string;
+                  gas_limit?: string;
+                };
+              };
+              authorization_context: { user_jwts: string[] };
+            },
+          ) => Promise<unknown>;
+        };
+      };
+    };
+    try {
+      const dynamicImport = new Function('m', 'return import(m)') as (m: string) => Promise<unknown>;
+      const mod = (await dynamicImport('@privy-io/node')) as {
+        PrivyClient?: new (input: { appId: string; appSecret: string }) => unknown;
+      };
+      if (!mod.PrivyClient) {
+        throw new Error('PrivyClient export not found');
+      }
+      PrivyClientCtor = mod.PrivyClient as typeof PrivyClientCtor;
+    } catch {
+      throw new BadRequestException(
+        'Privy Node SDK is not installed on backend. Run: npm install @privy-io/node',
+      );
+    }
+
+    const privy = new PrivyClientCtor({
+      appId: privyAppId,
+      appSecret: privyAppSecret,
+    });
+    try {
+      const verified = await (privy as unknown as {
+        utils: () => { auth: () => { verifyAccessToken: (accessToken: string) => Promise<unknown> } };
+      })
+        .utils()
+        .auth()
+        .verifyAccessToken(userJwt);
+      this.logger.log(
+        `[privySend] step=verify_ok walletId=${senderPrivyWalletId} verified=${JSON.stringify(verified)}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Privy verifyAccessToken failed appId=${privyAppId} walletId=${senderPrivyWalletId} jwt=${JSON.stringify(jwtDebug)} error=${message}`,
+      );
+      throw new BadRequestException(
+        `Privy access token verification failed: ${message}. Check token freshness, PRIVY_APP_ID/PRIVY_APP_SECRET, and that frontend/backend use the same Privy app.`,
+      );
+    }
+
+    let response: {
+      hash?: string;
+      data?: {
+        hash?: string;
+      };
+    };
+
+    try {
+      const message = `privy-auth-check:${senderPrivyWalletId}:${Date.now()}`;
+      this.logger.log(`[privySend] step=sign_msg_start walletId=${senderPrivyWalletId}`);
+      const signResult = await (privy as unknown as {
+        wallets: () => {
+          ethereum: () => {
+            signMessage: (
+              walletId: string,
+              input: {
+                message: string;
+                authorization_context: { user_jwts: string[] };
+              },
+            ) => Promise<{ signature?: string }>;
+          };
+        };
+      })
+        .wallets()
+        .ethereum()
+        .signMessage(senderPrivyWalletId, {
+          message,
+          authorization_context: {
+            user_jwts: [userJwt],
+          },
+        });
+      const signature = signResult?.signature ?? '';
+      this.logger.log(
+        `[privySend] step=sign_msg_ok walletId=${senderPrivyWalletId} sigLen=${signature.length} sigPrefix=${signature.slice(0, 10)}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const jwtSub = typeof jwtPayload?.sub === 'string' ? jwtPayload.sub : undefined;
+      if (jwtSub) {
+        try {
+          const userWallets: Array<{ id: string; address: string }> = [];
+          const iterable = (privy as unknown as {
+            wallets: () => {
+              list: (input: { user_id: string; chain_type?: string }) => AsyncIterable<{
+                id?: string;
+                address?: string;
+              }>;
+            };
+          })
+            .wallets()
+            .list({ user_id: jwtSub, chain_type: 'ethereum' });
+          for await (const wallet of iterable) {
+            if (typeof wallet?.id === 'string' && typeof wallet?.address === 'string') {
+              userWallets.push({ id: wallet.id, address: wallet.address });
+            }
+            if (userWallets.length >= 10) break;
+          }
+          this.logger.error(
+            `Privy signMessage preflight context debug sub=${jwtSub} requestedWalletId=${senderPrivyWalletId} wallets=${JSON.stringify(userWallets)}`,
+          );
+        } catch (listError) {
+          const listMessage = listError instanceof Error ? listError.message : String(listError);
+          this.logger.error(`Privy wallets.list debug failed for sub=${jwtSub}: ${listMessage}`);
+        }
+      }
+      this.logger.error(
+        `Privy signMessage preflight failed walletId=${senderPrivyWalletId} jwt=${JSON.stringify(jwtDebug)} error=${message} detail=${this.privyErrorDetails(error)}`,
+      );
+      throw new BadRequestException(
+        `Privy signMessage preflight failed: ${message}. This indicates JWT authorization context is failing before sendTransaction.`,
+      );
+    }
+
+    try {
+      const jwtLength = typeof userJwt === 'string' ? userJwt.length : 0;
+      const jwtFingerprint = jwtLength > 0 ? createHash('sha256').update(userJwt).digest('hex').slice(0, 12) : 'none';
+      this.logger.log(
+        `[privySend] step=send_tx_start walletId=${senderPrivyWalletId} to=${tx.to} from=${tx.from} jwtPresent=${
+          jwtLength > 0
+        } jwtLen=${jwtLength} jwtFp=${jwtFingerprint} userJwtsCount=1`,
+      );
+      response = (await privy.wallets().ethereum().sendTransaction(senderPrivyWalletId, {
+        caip2,
+        params: {
+          transaction: {
+            from: tx.from,
+            to: tx.to,
+            data: tx.data,
+            value: tx.value,
+            gas_limit: tx.gas,
+          },
+        },
+        authorization_context: {
+          user_jwts: [userJwt],
+        },
+      })) as {
+        hash?: string;
+        data?: {
+          hash?: string;
+        };
+      };
+      this.logger.log(`[privySend] step=send_tx_ok walletId=${senderPrivyWalletId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Privy sendTransaction failed walletId=${senderPrivyWalletId} caip2=${caip2} from=${tx.from} to=${tx.to} jwt=${JSON.stringify(jwtDebug)} error=${message} detail=${this.privyErrorDetails(error)}`,
+      );
+      if (message.toLowerCase().includes('invalid jwt token provided')) {
+        this.logger.error(message);
+        throw new BadRequestException(
+          'Privy rejected user_jwt during wallet authorization for this wallet/session. Re-login to refresh token and wallet binding. If it persists, verify token walletId matches the sender wallet and reset the test user embedded wallet in Privy Dashboard.',
+        );
+      }
+      throw error;
+    }
+
+    const hash = response?.hash ?? response?.data?.hash;
+    if (hash && hash.startsWith('0x')) {
+      this.logger.log(`[privySend] step=hash_ok walletId=${senderPrivyWalletId} txHash=${hash}`);
+      return hash;
+    }
+    this.logger.error(`[privySend] step=hash_missing walletId=${senderPrivyWalletId}`);
+    throw new BadRequestException('Privy wallet SDK response missing transaction hash');
   }
 
   private async getUserTransfers(user: {
@@ -1066,6 +1539,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     walletAddress: string;
     chain: string;
     privyUserId?: string;
+    privyWalletId?: string;
     custodial: boolean;
     encryptedPrivateKey?: string;
   } {
@@ -1073,6 +1547,12 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       .prepare('SELECT * FROM users WHERE privy_user_id = ? LIMIT 1')
       .get(auth.sub) as UserRow | undefined;
     if (byPrivy) {
+      if (auth.walletId && byPrivy.privy_wallet_id !== auth.walletId) {
+        this.db
+          .prepare('UPDATE users SET privy_wallet_id = ? WHERE id = ?')
+          .run(auth.walletId, byPrivy.id);
+        byPrivy.privy_wallet_id = auth.walletId;
+      }
       return this.rowToUser(byPrivy);
     }
 
@@ -1082,8 +1562,13 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
         .get(auth.walletAddress.toLowerCase()) as UserRow | undefined;
       if (byWallet) {
         if (!byWallet.privy_user_id) {
-          this.db.prepare('UPDATE users SET privy_user_id = ? WHERE id = ?').run(auth.sub, byWallet.id);
+          this.db
+            .prepare('UPDATE users SET privy_user_id = ?, privy_wallet_id = COALESCE(?, privy_wallet_id) WHERE id = ?')
+            .run(auth.sub, auth.walletId ?? null, byWallet.id);
           byWallet.privy_user_id = auth.sub;
+          if (auth.walletId) {
+            byWallet.privy_wallet_id = auth.walletId;
+          }
         }
         return this.rowToUser(byWallet);
       }
@@ -1098,10 +1583,10 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     const id = `user_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     this.db
       .prepare(
-        `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, custodial, encrypted_private_key, created_at)
-         VALUES (?, ?, ?, ?, ?, 0, NULL, ?)`,
+        `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)`,
       )
-      .run(id, handleCandidate, walletAddress, this.chainName, auth.sub, new Date().toISOString());
+      .run(id, handleCandidate, walletAddress, this.chainName, auth.sub, auth.walletId ?? null, new Date().toISOString());
 
     return {
       id,
@@ -1109,6 +1594,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       walletAddress,
       chain: this.chainName,
       privyUserId: auth.sub,
+      privyWalletId: auth.walletId,
       custodial: false,
     };
   }
@@ -1161,8 +1647,8 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
 
     this.db
       .prepare(
-        `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, custodial, encrypted_private_key, created_at)
-         VALUES (?, ?, ?, ?, NULL, 1, ?, ?)`,
+        `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, 1, ?, ?)`,
       )
       .run(id, handle, wallet.address, this.chainName, encrypted, new Date().toISOString());
 
@@ -1184,9 +1670,108 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       walletAddress: row.wallet_address,
       chain: row.chain,
       privyUserId: row.privy_user_id ?? undefined,
+      privyWalletId: row.privy_wallet_id ?? undefined,
       custodial: row.custodial === 1,
       encryptedPrivateKey: row.encrypted_private_key ?? undefined,
     };
+  }
+
+  private async claimPendingPaymentsForHandle(
+    handle: string,
+    recipientUserId: string,
+    recipientWalletAddress: string,
+    auth?: AuthUser,
+  ) {
+    if (!this.provider) {
+      return;
+    }
+
+    const normalizedHandle = this.normalizeHandle(handle);
+    const nowIso = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE payments
+         SET status = 'expired', updated_at = ?, failure_code = 'claim_expired', failure_message = 'Claim window expired'
+         WHERE status = 'pending_claim' AND lower(recipient_handle) = ? AND expires_at IS NOT NULL AND expires_at <= ?`,
+      )
+      .run(nowIso, normalizedHandle, nowIso);
+
+    const pending = this.db
+      .prepare(
+        `SELECT * FROM payments
+         WHERE status = 'pending_claim' AND lower(recipient_handle) = ?
+         ORDER BY created_at ASC`,
+      )
+      .all(normalizedHandle) as PaymentRow[];
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    const deployerPk = this.env('DEPLOYER_PRIVATE_KEY');
+    if (!deployerPk) {
+      this.logger.warn(`Cannot claim pending payments for ${normalizedHandle}: DEPLOYER_PRIVATE_KEY missing`);
+      return;
+    }
+
+    const signer = new Wallet(deployerPk, this.provider as JsonRpcProvider);
+    for (const row of pending) {
+      const stablecoin = this.getStablecoinBySymbol(row.stablecoin);
+      const token = new Contract(stablecoin.address, TIP20_ABI, signer);
+      const amountUnits = this.usdToTokenUnits(row.amount_usd, stablecoin.decimals);
+
+      try {
+        const tx = await token.transferWithMemo(recipientWalletAddress, amountUnits, row.memo_hex);
+        this.db
+          .prepare(
+            `UPDATE payments
+             SET recipient_user_id = ?, status = 'submitted', tx_hash = ?, updated_at = ?, claimed_at = ?, failure_code = NULL, failure_message = NULL
+             WHERE payment_id = ?`,
+          )
+          .run(recipientUserId, tx.hash, new Date().toISOString(), new Date().toISOString(), row.payment_id);
+
+        const receipt = await tx.wait(1);
+        const settled = receipt?.status === 1;
+        this.db
+          .prepare(
+            `UPDATE payments
+             SET status = ?, updated_at = ?, failure_code = ?, failure_message = ?
+             WHERE payment_id = ?`,
+          )
+          .run(
+            settled ? 'settled' : 'failed',
+            new Date().toISOString(),
+            settled ? null : 'receipt_failed',
+            settled ? null : 'Transaction receipt status indicates failure',
+            row.payment_id,
+          );
+
+        this.metrics.incPayment(settled ? 'settled' : 'failed', stablecoin.symbol, 'pending_claim_release');
+        await this.syncIndexerInternal();
+
+        const updated = this.db
+          .prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1')
+          .get(row.payment_id) as PaymentRow;
+        if (settled) {
+          this.enqueuePaymentNotifications(updated);
+        }
+        this.audit(auth, 'claim_pending_payment', row.payment_id, {
+          txHash: tx.hash,
+          recipientUserId,
+          recipientWalletAddress,
+          signerAddress: signer.address,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.db
+          .prepare(
+            `UPDATE payments
+             SET recipient_user_id = ?, status = 'failed', updated_at = ?, failure_code = ?, failure_message = ?
+             WHERE payment_id = ?`,
+          )
+          .run(recipientUserId, new Date().toISOString(), 'pending_claim_release_error', message, row.payment_id);
+      }
+    }
   }
 
   private enqueuePaymentNotifications(payment: PaymentRow) {
@@ -1450,6 +2035,69 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     return trimmed.length > 0 ? trimmed : undefined;
   }
 
+  private jwtDebugPayload(jwt: string): Record<string, unknown> {
+    try {
+      const [header, payload] = jwt.split('.');
+      const headerJson = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as Record<string, unknown>;
+      const payloadJson = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>;
+      return {
+        header: {
+          alg: headerJson.alg,
+          kid: headerJson.kid,
+          typ: headerJson.typ,
+        },
+        payload: {
+          iss: payloadJson.iss,
+          aud: payloadJson.aud,
+          sub: payloadJson.sub,
+          iat: payloadJson.iat,
+          exp: payloadJson.exp,
+          sid: payloadJson.sid,
+        },
+      };
+    } catch {
+      return { parseError: true, length: jwt.length };
+    }
+  }
+
+  private jwtPayload(jwt: string): Record<string, unknown> | null {
+    try {
+      const [, payload] = jwt.split('.');
+      return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  private privyErrorDetails(error: unknown): string {
+    if (!error || typeof error !== 'object') {
+      return '';
+    }
+    const e = error as {
+      name?: string;
+      status?: number;
+      code?: string;
+      type?: string;
+      headers?: Record<string, string | string[] | undefined>;
+      response?: {
+        headers?: Record<string, string | string[] | undefined>;
+      };
+    };
+    const headers = e.headers ?? e.response?.headers;
+    const requestId =
+      (headers?.['x-request-id'] as string | undefined) ??
+      (headers?.['X-Request-Id'] as string | undefined) ??
+      (headers?.['x-amzn-requestid'] as string | undefined);
+    const detail = {
+      name: e.name,
+      status: e.status,
+      code: e.code,
+      type: e.type,
+      requestId,
+    };
+    return JSON.stringify(detail);
+  }
+
   private ensureProvider() {
     if (!this.provider) {
       throw new InternalServerErrorException('TEMPO_RPC_URL is required for onchain integration.');
@@ -1537,8 +2185,8 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     const encrypted = this.encryptPrivateKey(deployerPk);
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO users (id, handle, wallet_address, chain, privy_user_id, custodial, encrypted_private_key, created_at)
-         VALUES ('user_owner', ?, ?, ?, NULL, 1, ?, ?)`,
+        `INSERT OR IGNORE INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
+         VALUES ('user_owner', ?, ?, ?, NULL, NULL, 1, ?, ?)`,
       )
       .run(handle, walletAddress, this.chainName, encrypted, new Date().toISOString());
   }

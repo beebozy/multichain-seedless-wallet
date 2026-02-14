@@ -4,7 +4,9 @@ import { InlineNotice } from "./app/InlineNotice";
 
 type Props = {
   stablecoinOptions?: string[];
-  onSend?: (input: { recipientHandle: string; amountUsd: number; stablecoin: string; memo?: string }) => Promise<void>;
+  onSend?: (
+    input: { recipientHandle: string; amountUsd: number; stablecoin: string; memo?: string }
+  ) => Promise<{ successMessage?: string } | void>;
 };
 
 const defaultTokens = ["pathUSD", "USDC", "USDT", "AlphaUSD"];
@@ -31,13 +33,13 @@ export function PaymentComposer({ stablecoinOptions, onSend }: Props) {
     setSending(true);
     setStatus(null);
     try {
-      await onSend({
+      const result = await onSend({
         recipientHandle: recipientHandle.trim(),
         amountUsd: Number(amountUsd),
         stablecoin,
         memo: memo.trim() || undefined
       });
-      setStatus({ type: "success", message: "Payment submitted and awaiting settlement." });
+      setStatus({ type: "success", message: result?.successMessage ?? "Payment submitted and awaiting settlement." });
       setMemo("");
       setAmountUsd("");
     } catch (error) {

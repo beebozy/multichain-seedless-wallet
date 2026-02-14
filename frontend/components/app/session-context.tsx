@@ -1,9 +1,9 @@
 "use client";
 
-import { usePrivy } from "@privy-io/react-auth";
+import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { privyUpsert, type BackendSession } from "../../lib/backend-api";
-import { extractEmail, extractPhone, extractPrivyUserId, extractWallet } from "../../lib/user-extractors";
+import { extractEmail, extractPhone, extractPrivyUserId, extractWallet, extractWalletId } from "../../lib/user-extractors";
 
 type SessionState = {
   ready: boolean;
@@ -23,6 +23,7 @@ const forcedDevRole = process.env.NEXT_PUBLIC_DEV_ROLE;
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const { ready, authenticated, user, getAccessToken, logout } = usePrivy();
+  const { wallets } = useWallets();
   const [bootstrapping, setBootstrapping] = useState(false);
   const [appUserId, setAppUserId] = useState<string | null>(null);
   const [backendSession, setBackendSession] = useState<BackendSession | null>(null);
@@ -45,12 +46,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       try {
         const token = await getAccessToken();
         const privyUserId = extractPrivyUserId(user);
-        const walletAddress = extractWallet(user);
+        const embeddedEthereumWallet = wallets.find(
+          (wallet) => wallet.type === "ethereum" && wallet.walletClientType === "privy"
+        );
+        const walletAddress = embeddedEthereumWallet?.address ?? extractWallet(user);
         const email = extractEmail(user);
         const phone = extractPhone(user);
         if (!privyUserId || !walletAddress) {
           throw new Error("Unable to extract Privy user id or wallet address.");
         }
+        const walletId = extractWalletId(user, walletAddress);
 
         const session: BackendSession = {
           baseUrl: backendBaseUrl,
@@ -61,6 +66,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
                 email,
                 phone,
                 wallet: walletAddress,
+                walletId,
                 role: forcedDevRole
               }
             : undefined
@@ -73,6 +79,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         const upsert = await privyUpsert(session, {
           privyUserId,
           walletAddress,
+          walletId,
           email,
           phone
         });
@@ -100,7 +107,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [authenticated, getAccessToken, ready, user]);
+  }, [authenticated, getAccessToken, ready, user, wallets]);
 
   const value = useMemo<SessionState>(
     () => ({
