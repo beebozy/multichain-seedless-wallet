@@ -10,7 +10,6 @@ import {
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
-import Database = require('better-sqlite3');
 import {
   Contract,
   decodeBytes32String,
@@ -21,7 +20,7 @@ import {
   Wallet,
 } from 'ethers';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { ResolveRecipientDto } from './dto/resolve-recipient.dto';
 import { SendPaymentDto } from './dto/send-payment.dto';
@@ -33,6 +32,7 @@ import { ConfirmSignedPaymentDto } from './dto/confirm-signed-payment.dto';
 import { BatchSendPaymentsDto } from './dto/batch-send-payments.dto';
 import { AuthUser } from './auth/auth.types';
 import { MetricsService } from './metrics.service';
+import { PgSyncDatabase } from './pg-sync-db';
 
 type UserRow = {
   id: string;
@@ -175,26 +175,17 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
   private readonly feeSponsored = (this.env('TEMPO_FEE_SPONSORED') ?? 'true') !== 'false';
   private readonly indexerEnabled = (this.env('INDEXER_ENABLED') ?? 'true') !== 'false';
   private readonly indexerIntervalMs = Number(this.env('INDEXER_INTERVAL_MS') ?? 30000);
-  private readonly notifyEnabled = (this.env('NOTIFY_ENABLED') ?? 'true') !== 'false';
-  private readonly notifyProvider = (this.env('NOTIFY_PROVIDER') ?? 'log').toLowerCase();
-  private readonly notifyRetryMax = Number(this.env('NOTIFY_RETRY_MAX') ?? 5);
-  private readonly notifyRetryBaseMs = Number(this.env('NOTIFY_RETRY_BASE_MS') ?? 5000);
-  private readonly notifyWorkerIntervalMs = Number(this.env('NOTIFY_WORKER_INTERVAL_MS') ?? 5000);
   private readonly encryptionSecret = this.env('CUSTODIAL_KEY_ENCRYPTION_SECRET') ?? '';
 
-  private readonly dataDir = path.resolve(process.cwd(), 'data');
-  private readonly dbPath = path.resolve(this.dataDir, 'backend.sqlite');
-  private readonly db: Database.Database;
+  private readonly db: PgSyncDatabase;
   private readonly stablecoins: StablecoinConfig[];
 
   private indexerTimer: NodeJS.Timeout | null = null;
-  private notificationTimer: NodeJS.Timeout | null = null;
   private syncing = false;
-  private notifying = false;
 
   constructor(private readonly metrics: MetricsService) {
-    this.ensureDataDir();
-    this.db = new Database(this.dbPath);
+    const databaseUrl = this.env('DATABASE_URL');
+    this.db = new PgSyncDatabase(databaseUrl);
     this.db.pragma('journal_mode = WAL');
     this.setupSchema();
     this.stablecoins = this.loadStablecoins();
@@ -211,24 +202,12 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       }, this.indexerIntervalMs);
     }
 
-    if (this.notifyEnabled) {
-      this.notificationTimer = setInterval(() => {
-        this.processNotificationQueue().catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.error(`Notification worker failed: ${message}`);
-        });
-      }, this.notifyWorkerIntervalMs);
-    }
   }
 
   onModuleDestroy() {
     if (this.indexerTimer) {
       clearInterval(this.indexerTimer);
       this.indexerTimer = null;
-    }
-    if (this.notificationTimer) {
-      clearInterval(this.notificationTimer);
-      this.notificationTimer = null;
     }
     this.db.close();
   }
@@ -504,9 +483,6 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       const row = this.db
         .prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1')
         .get(paymentId) as PaymentRow;
-      if (settled) {
-        this.enqueuePaymentNotifications(row);
-      }
 
       this.audit(auth, 'send_payment_deployer_signer', paymentId, {
         txHash,
@@ -760,9 +736,6 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     await this.syncIndexerInternal();
 
     const updated = this.db.prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1').get(row.payment_id) as PaymentRow;
-    if (settled) {
-      this.enqueuePaymentNotifications(updated);
-    }
 
     this.audit(auth, 'confirm_signed_payment', row.payment_id, {
       txHash,
@@ -1093,7 +1066,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       );
 
       CREATE TABLE IF NOT EXISTS audit_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id BIGSERIAL PRIMARY KEY,
         actor_user_id TEXT,
         action TEXT NOT NULL,
         target TEXT,
@@ -1122,22 +1095,9 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS notifications_pending_idx
         ON notifications(status, next_retry_at);
     `);
-
-    const paymentColumns = this.db.prepare(`PRAGMA table_info(payments)`).all() as Array<{ name: string }>;
-    const hasExpiresAt = paymentColumns.some((col) => col.name === 'expires_at');
-    const hasClaimedAt = paymentColumns.some((col) => col.name === 'claimed_at');
-    if (!hasExpiresAt) {
-      this.db.exec(`ALTER TABLE payments ADD COLUMN expires_at TEXT`);
-    }
-    if (!hasClaimedAt) {
-      this.db.exec(`ALTER TABLE payments ADD COLUMN claimed_at TEXT`);
-    }
-
-    const userColumns = this.db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
-    const hasPrivyWalletId = userColumns.some((col) => col.name === 'privy_wallet_id');
-    if (!hasPrivyWalletId) {
-      this.db.exec(`ALTER TABLE users ADD COLUMN privy_wallet_id TEXT`);
-    }
+    this.db.exec(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS expires_at TEXT`);
+    this.db.exec(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS claimed_at TEXT`);
+    this.db.exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privy_wallet_id TEXT`);
 
     const hasState = this.db.prepare('SELECT 1 FROM indexer_state WHERE id = 1').get();
     if (!hasState) {
@@ -1797,9 +1757,6 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
         const updated = this.db
           .prepare('SELECT * FROM payments WHERE payment_id = ? LIMIT 1')
           .get(row.payment_id) as PaymentRow;
-        if (settled) {
-          this.enqueuePaymentNotifications(updated);
-        }
         this.audit(auth, 'claim_pending_payment', row.payment_id, {
           txHash: tx.hash,
           recipientUserId,
@@ -1817,153 +1774,6 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
           .run(recipientUserId, new Date().toISOString(), 'pending_claim_release_error', message, row.payment_id);
       }
     }
-  }
-
-  private enqueuePaymentNotifications(payment: PaymentRow) {
-    if (!this.notifyEnabled) {
-      return;
-    }
-
-    const recipient = this.getUserById(payment.recipient_user_id);
-    const sender = this.getUserById(payment.sender_user_id);
-    const now = new Date().toISOString();
-
-    const jobs: Array<{ channel: 'email' | 'sms'; destination: string }> = [];
-    if (this.looksLikeEmail(recipient.handle)) {
-      jobs.push({ channel: 'email', destination: recipient.handle });
-    }
-    if (this.looksLikePhone(recipient.handle)) {
-      jobs.push({ channel: 'sms', destination: recipient.handle });
-    }
-
-    for (const job of jobs) {
-      const id = `ntf_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
-      const payload = {
-        paymentId: payment.payment_id,
-        txHash: payment.tx_hash,
-        amountUsd: payment.amount_usd,
-        stablecoin: payment.stablecoin,
-        memo: payment.memo,
-        senderHandle: sender.handle,
-        recipientHandle: recipient.handle,
-      };
-
-      this.db
-        .prepare(
-          `INSERT INTO notifications (
-            id, payment_id, user_id, channel, destination, provider, template, payload_json,
-            status, attempts, provider_message_id, last_error, next_retry_at, sent_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, NULL, ?, ?)`,
-        )
-        .run(
-          id,
-          payment.payment_id,
-          recipient.id,
-          job.channel,
-          job.destination,
-          this.notifyProvider,
-          'payment_received',
-          JSON.stringify(payload),
-          now,
-          now,
-          now,
-        );
-    }
-  }
-
-  private async processNotificationQueue() {
-    if (this.notifying) {
-      return;
-    }
-    this.notifying = true;
-
-    try {
-      const now = new Date().toISOString();
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM notifications
-           WHERE status = 'pending' AND next_retry_at <= ?
-           ORDER BY created_at ASC
-           LIMIT 50`,
-        )
-        .all(now) as NotificationRow[];
-
-      for (const row of rows) {
-        await this.processSingleNotification(row);
-      }
-    } finally {
-      this.notifying = false;
-    }
-  }
-
-  private async processSingleNotification(row: NotificationRow) {
-    const attempts = row.attempts + 1;
-    try {
-      const providerMessageId = await this.deliverNotification(row);
-      const now = new Date().toISOString();
-      this.db
-        .prepare(
-          `UPDATE notifications
-           SET status='sent', attempts=?, provider_message_id=?, sent_at=?, updated_at=?
-           WHERE id=?`,
-        )
-        .run(attempts, providerMessageId ?? null, now, now, row.id);
-      this.metrics.incNotification('sent', row.channel, row.provider);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const failed = attempts >= this.notifyRetryMax;
-      const delayMs = this.notifyRetryBaseMs * 2 ** Math.max(0, attempts - 1);
-      const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
-      const now = new Date().toISOString();
-
-      this.db
-        .prepare(
-          `UPDATE notifications
-           SET status=?, attempts=?, last_error=?, next_retry_at=?, updated_at=?
-           WHERE id=?`,
-        )
-        .run(failed ? 'failed' : 'pending', attempts, message, nextRetryAt, now, row.id);
-
-      this.metrics.incNotification('failed', row.channel, row.provider);
-    }
-  }
-
-  private async deliverNotification(row: NotificationRow): Promise<string | undefined> {
-    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-    if (this.notifyProvider === 'webhook') {
-      const url = this.env('NOTIFY_WEBHOOK_URL');
-      if (!url) {
-        throw new Error('NOTIFY_WEBHOOK_URL is required for webhook provider');
-      }
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          channel: row.channel,
-          destination: row.destination,
-          template: row.template,
-          payload,
-        }),
-      });
-      if (!resp.ok) {
-        const body = await resp.text();
-        throw new Error(`Webhook notify failed: ${resp.status} ${body}`);
-      }
-      return resp.headers.get('x-message-id') ?? undefined;
-    }
-
-    this.logger.log(
-      `[notify:${row.channel}] to=${row.destination} template=${row.template} payload=${JSON.stringify(payload)}`,
-    );
-    return `log-${Date.now()}`;
-  }
-
-  private looksLikeEmail(value: string): boolean {
-    return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(value.trim());
-  }
-
-  private looksLikePhone(value: string): boolean {
-    return /^\\+?[0-9]{8,15}$/.test(value.trim());
   }
 
   private loadStablecoins(): StablecoinConfig[] {
@@ -2150,9 +1960,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private ensureDataDir() {
-    if (!existsSync(this.dataDir)) {
-      mkdirSync(this.dataDir, { recursive: true });
-    }
+    // no-op in postgres mode
   }
 
   private normalizeHandle(handle: string): string {
@@ -2230,8 +2038,9 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     const encrypted = this.encryptPrivateKey(deployerPk);
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
-         VALUES ('user_owner', ?, ?, ?, NULL, NULL, 1, ?, ?)`,
+        `INSERT INTO users (id, handle, wallet_address, chain, privy_user_id, privy_wallet_id, custodial, encrypted_private_key, created_at)
+         VALUES ('user_owner', ?, ?, ?, NULL, NULL, 1, ?, ?)
+         ON CONFLICT (id) DO NOTHING`,
       )
       .run(handle, walletAddress, this.chainName, encrypted, new Date().toISOString());
   }

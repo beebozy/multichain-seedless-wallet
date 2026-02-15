@@ -1188,6 +1188,28 @@ textarea {
   .sidebar {
     min-height: 0;
     position: static;
+    border-right: none;
+    border-bottom: 1px solid rgba(68, 245, 169, 0.18);
+    padding-right: 0;
+    padding-bottom: 0.8rem;
+  }
+
+  .sidebar-nav {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.35rem;
+  }
+
+  .nav-link {
+    border-left: none;
+    border-bottom: 1px solid rgba(68, 245, 169, 0.28);
+    text-align: center;
+    padding-inline: 0.3rem;
+  }
+
+  .sidebar-foot {
+    margin-top: 0.2rem;
+    grid-template-columns: 1fr auto;
+    align-items: center;
   }
 
   .page-grid,
@@ -1203,6 +1225,20 @@ textarea {
   .spectra-rail-minimal {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .flow-curve-wrap {
+    border-left: none;
+    padding-left: 0;
+  }
+
+  .flow-mode-switch {
+    flex-wrap: wrap;
+  }
+
+  .payment-composer-actions,
+  .payment-quick-actions {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1215,6 +1251,35 @@ textarea {
   .spectra-nav {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .app-topbar::after {
+    width: 140px;
+    height: 140px;
+    right: -70px;
+    top: -65px;
+  }
+
+  .app-topbar h1 {
+    font-size: 1rem;
+  }
+
+  .sidebar-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-link {
+    text-align: left;
+  }
+
+  .sidebar-foot {
+    grid-template-columns: 1fr;
+  }
+
+  .section-title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
   }
 
   .contact-table,
@@ -1247,11 +1312,43 @@ textarea {
   }
 
   .payment-composer-actions {
-    flex-direction: row;
+    flex-direction: column;
   }
 
   .payment-composer-actions .btn {
-    width: auto;
+    width: 100%;
+  }
+
+  .payment-quick-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .payment-quick-actions .ghost-chip {
+    width: 100%;
+    text-align: center;
+  }
+
+  .timeline-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .flow-legend {
+    flex-direction: column;
+    gap: 0.38rem;
+  }
+
+  .flow-mode-switch {
+    width: 100%;
+  }
+
+  .flow-mode-btn {
+    flex: 1 1 auto;
+    text-align: center;
   }
 }
 
@@ -1820,6 +1917,15 @@ textarea {
     flex-direction: column;
     align-items: flex-start;
   }
+
+  .nova-links {
+    row-gap: 0.4rem;
+  }
+
+  .nova-chart-wrap {
+    border-left: none;
+    padding-left: 0;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1830,6 +1936,12 @@ textarea {
   .nova-nav {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .nova-links {
+    width: 100%;
+    justify-content: space-between;
+    gap: 0.5rem;
   }
 
   .nova-strip {
@@ -1844,6 +1956,30 @@ textarea {
     font-size: clamp(1.6rem, 11vw, 2.5rem);
   }
 
+  .nova-actions {
+    width: 100%;
+  }
+
+  .nova-actions .nova-cta {
+    width: 100%;
+  }
+
+  .nova-link-btn {
+    width: 100%;
+    text-align: center;
+  }
+
+  .nova-chart-meta {
+    flex-direction: column;
+    gap: 0.26rem;
+  }
+
+  .nova-node,
+  .nova-strip-orbit,
+  .nova-rail-orbit {
+    display: none;
+  }
+
   .ring-a {
     width: 250px;
     height: 250px;
@@ -1852,5 +1988,34 @@ textarea {
   .ring-b {
     width: 180px;
     height: 180px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-shell,
+  .nova-wrap {
+    padding: 0.6rem;
+  }
+
+  .brand-script {
+    font-size: 1.18rem;
+  }
+
+  .brand-sans {
+    font-size: 0.62rem;
+  }
+
+  .panel-kicker,
+  .meta-text {
+    font-size: 0.76rem;
+  }
+
+  .kpi-value {
+    font-size: 1.02rem;
+  }
+
+  .flow-tooltip-in,
+  .flow-tooltip-out {
+    font-size: 0.68rem;
   }
 }
