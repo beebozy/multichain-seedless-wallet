@@ -28,7 +28,7 @@ Temvy replaces this with:
 - Frontend: Next.js (App Router), custom responsive web3 UI
 - Backend: NestJS APIs, Postgres-backed persistence
 - Identity: Privy
-- Settlement: Tempo-compatible onchain transfer flow
+- Settlement: Tempo-compatible onchain transfer flow TIP20 using solidity 
 
 
 ## Demo Flow (Judge-Friendly)
@@ -44,7 +44,7 @@ Temvy replaces this with:
 - Node.js 20+
 - npm
 - PostgreSQL 14+
-
+- foundry 
 ### 1) Install dependencies
 ```bash
 cd backend && npm install
@@ -71,13 +71,18 @@ npm run start:dev
 cd frontend
 npm run dev
 ```
-
 Open: `http://localhost:3000`
+# 5) Run smart contract
+```bash
+cd onchain
+forge build
+
+**stable coin contract address ** 0x88aF18958231bEAeAD99E6403f50786ad96d0a9c
 
 
 ## Collaborators
 - Tola — Product, Engineering, Backend Integration
--
+- Beebozy- Smart contract, Backend
 
 ## License
 Project is for hackathon/demo use unless a separate license is added.
